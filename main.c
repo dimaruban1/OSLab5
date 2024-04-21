@@ -10,14 +10,16 @@
 
 #define SLEEP_INTERVAL 3
 #define SHARED_MEMORY_SIZE 4096
-#define PROCESS_SUCCESS 't'
-#define PROCESS_FAILURE 'f'
-#define PROCESS_UNDEFINED 'u'
-#define PROCESS_EXECUTING 'e'
+#define TRUE 'T'
+#define FALSE 'F'
+#define UNDEFINED 'U'
+#define EXECUTING 'E'
 #define G_STATUS_ADDRESS 0
 #define F_STATUS_ADDRESS 1
-#define CONTINUE_PROMPT_TIMEOUT_LENGTH 10
-#define CHECK_OTHER_FUNCTION_TIMEOUT_LENGTH 1
+#define CONTINUE_PROMPT_TIMEOUT_LENGTH 13
+#define CONTINUE_PROMPT_TIMEOUT_LENGTH 21
+#define CHECK_STATUSES_TIMEOUT_LENGTH 2
+#define RESULT_NOT_SET -1
 
 /*
 заємодія процесів. Паралелізм. mmap. 
@@ -25,6 +27,18 @@
 Основна програма виконує ввод-вивід та операцію *. 
 Використати mmap() доступ до спільного файлу. Функції f(x) та g(x) “нічого не знають друг про друга” і не можуть комунікувати між собою.
 */
+
+typedef struct {
+    int x;
+    int y;
+    int result;
+} f_args;
+
+typedef struct {
+    double t;
+    int result;
+} g_args;
+
 
 char* getSharedMemory(){
     char* shared_memory;
@@ -48,98 +62,66 @@ char* getSharedMemory(){
     return shared_memory;
 }
 
-void promptAlarmHandlerG(int signum) {
-    printf("Execution of function g took too long. Do you want to continue? (y/n): ");
-    char choice;
-    scanf(" %c", &choice);
-    if (choice != 'y' && choice != 'Y') {
-        char *shared_memory = getSharedMemory();
-        shared_memory[G_STATUS_ADDRESS] = PROCESS_UNDEFINED;
-        printf("Execution aborted.\n");
-        exit(0);
-    }
-}
-void promptAlarmHandlerF(int signum) {
-    printf("Execution of function f took too long. Do you want to continue? (y/n): ");
-    char choice;
-    scanf(" %c", &choice);
-    if (choice != 'y' && choice != 'Y') {
-        char *shared_memory = getSharedMemory();
-        shared_memory[F_STATUS_ADDRESS] = PROCESS_UNDEFINED;
-        printf("Execution aborted.\n");
-        exit(0);
-    }
-}
-void checkOtherFunctionAlarmHandlerG(int signum) {
+
+char isResultDetermined(){
     char *shared_memory = getSharedMemory();
     char f_res = shared_memory[F_STATUS_ADDRESS];
-    printf("checking out f: %c", f_res)
-}
-void checkOtherFunctionAlarmHandlerF(int signum) {
-    printf("Execution of function f took too long. Do you want to continue? (y/n): ");
-    char choice;
-    scanf(" %c", &choice);
-    if (choice != 'y' && choice != 'Y') {
-        printf("Execution aborted.\n");
-        exit(0);
+    char g_res = shared_memory[G_STATUS_ADDRESS];
+    printf("checking out f: %c\n", f_res);
+    switch (f_res){
+        case FALSE:
+            return FALSE;
+            break;
+        default:
+            break;
     }
+    printf("checking out g: %c\n", g_res);
+    switch (g_res){
+        case FALSE:
+            return FALSE;
+            break;
+        default:
+            break;
+    }
+    return EXECUTING;
 }
-
-typedef struct {
-    int x;
-    int y;
-    int result;
-} f_args;
-
-typedef struct {
-    double t;
-    int result;
-} g_args;
 
 void *f(void *arg){
-    signal(SIGALRM, promptAlarmHandlerF);
-    
     f_args *targ = (f_args*)arg;
     int x = targ->x;
     int y = targ->y;
-    int *result = malloc(sizeof(int));
 
     char *shared_memory = getSharedMemory();
-    shared_memory[F_STATUS_ADDRESS] = PROCESS_EXECUTING;
+    shared_memory[F_STATUS_ADDRESS] = EXECUTING;
 
-    alarm(CONTINUE_PROMPT_TIMEOUT_LENGTH);
     while (1){
         sleep(SLEEP_INTERVAL);
         x -= y;
         if (x == 0){
-            shared_memory[F_STATUS_ADDRESS] = PROCESS_SUCCESS;
-            targ->result = 1;
+            shared_memory[F_STATUS_ADDRESS] = TRUE;
+            targ->result = TRUE;
             break;
         }
         if (x < 0){
-            shared_memory[F_STATUS_ADDRESS] = PROCESS_FAILURE;
-            targ->result = 0;
+            shared_memory[F_STATUS_ADDRESS] = FALSE;
+            targ->result = FALSE;
             break;
         }
     }
-    alarm(0);
     pthread_exit(NULL);
 }
 
 void *g(void *arg){
-    signal(SIGALRM, promptAlarmHandlerG);
     g_args *targ = (g_args*)arg;
     double t = targ->t;
     printf("%f\n", t);
 
     char *shared_memory = getSharedMemory();
-    shared_memory[G_STATUS_ADDRESS] = PROCESS_EXECUTING;
+    shared_memory[G_STATUS_ADDRESS] = EXECUTING;
 
 
     double result;
-    int *res = malloc(sizeof(int));
 
-    alarm(CONTINUE_PROMPT_TIMEOUT_LENGTH);
     result = t * t * t;
     printf("t^3 = %.2f\n", result);
     sleep(SLEEP_INTERVAL);
@@ -154,21 +136,104 @@ void *g(void *arg){
 
     sleep(SLEEP_INTERVAL);
 
-    double log_t5 = log(t) / log(5);
-    if (isnan(log_t5)) {
-        printf("Error: log_t(5) is undefined.\n");
-        shared_memory[G_STATUS_ADDRESS] = PROCESS_FAILURE;
-        targ->result = 0;
+    if (t <= 0) {
+        printf("Error: t can`t be negative or zero.\n");
+        shared_memory[G_STATUS_ADDRESS] = FALSE;
+        targ->result = FALSE;
         pthread_exit(NULL);
     }
+    double log_t5 = log(t) / log(5);
+
     result -= log_t5;
     printf("t^3 + t^2 + 10t - log_t(5) = %.2f\n", result);
     sleep(SLEEP_INTERVAL);
 
-    shared_memory[G_STATUS_ADDRESS] = PROCESS_SUCCESS;
-    alarm(0);
-    targ->result = 1;
+    shared_memory[G_STATUS_ADDRESS] = TRUE;
+    targ->result = TRUE;
     pthread_exit(NULL);
+}
+
+void *executeG(void *arg) {
+    g_args *targ = (g_args*)arg;
+    pthread_t function_thread;
+    pthread_create(&function_thread, NULL, g, (void*)targ);
+    int time_executing = 0;
+    while(1){
+       if (targ->result != RESULT_NOT_SET){
+            printf("g result set = %c\n", targ->result);
+            break;
+        }
+        sleep(CHECK_STATUSES_TIMEOUT_LENGTH);
+        char res = isResultDetermined();
+        if (res != EXECUTING){
+            pthread_cancel(function_thread);
+            targ->result = res;
+        }
+
+        time_executing += CHECK_STATUSES_TIMEOUT_LENGTH;
+        if (time_executing >= CONTINUE_PROMPT_TIMEOUT_LENGTH){
+            time_executing = 0;
+            printf("Execution of function g is taking long. Do you want to continue? (y/n): ");
+            char choice;
+            scanf(" %c", &choice);
+            if (choice != 'y' && choice != 'Y') {
+                char *shared_memory = getSharedMemory();
+                shared_memory[G_STATUS_ADDRESS] = UNDEFINED;
+                targ->result = UNDEFINED;
+                printf("Execution of g aborted.\n");
+                pthread_cancel(function_thread);
+                break;
+            }
+        }
+    }
+}
+void *executeF(void *arg) {
+    f_args *targ = (f_args*)arg;
+    pthread_t function_thread;
+    pthread_create(&function_thread, NULL, f, (void*)targ);
+    int time_executing = 0;
+    while(1){
+        if (targ->result != RESULT_NOT_SET){
+            printf("f result set = %i\n", targ->result);
+            break;
+        }
+        sleep(CHECK_STATUSES_TIMEOUT_LENGTH);
+        char res = isResultDetermined();
+        if (res != EXECUTING){
+            pthread_cancel(function_thread);
+            targ->result = UNDEFINED;
+            break;
+        }
+
+        time_executing += CHECK_STATUSES_TIMEOUT_LENGTH;
+        if (time_executing >= CONTINUE_PROMPT_TIMEOUT_LENGTH){
+            time_executing = 0;
+            printf("Execution of function f is taking long. Do you want to continue? (y/n): ");
+            char choice;
+            scanf(" %c", &choice);
+            if (choice != 'y' && choice != 'Y') {
+                char *shared_memory = getSharedMemory();
+                shared_memory[F_STATUS_ADDRESS] = UNDEFINED;
+                targ->result = UNDEFINED;
+                printf("Execution of f aborted.\n");
+                pthread_cancel(function_thread);
+                break;
+            }
+        }
+    }
+}
+
+char dot(char left, char right){
+    if (left == FALSE || right == FALSE){
+        return FALSE;
+    }
+    else if (left == UNDEFINED || right == UNDEFINED){
+        return UNDEFINED;
+    }
+    else if (left == TRUE && right == TRUE){
+        return TRUE;
+    }
+    return UNDEFINED;
 }
 
 int main(){
@@ -186,16 +251,16 @@ int main(){
     printf("Enter the value of t (a double): ");
     scanf("%lf", &t);
 
-    g_args g_args = { t: t };
-    f_args f_args = { x: x, y: y };
-    pthread_create(&g_thread, NULL, g, (void*)&g_args);
-    pthread_create(&f_thread, NULL, f, (void*)&f_args);
+    g_args g_args = { t: t, result: RESULT_NOT_SET };
+    f_args f_args = { x: x, y: y, result: RESULT_NOT_SET };
+    pthread_create(&g_thread, NULL, executeG, (void*)&g_args);
+    pthread_create(&f_thread, NULL, executeF, (void*)&f_args);
 
     pthread_join(g_thread, NULL);
     pthread_join(f_thread, NULL);
 
-    printf("g = %i\n", g_args.result);
-    printf("f = %i\n", f_args.result);
-    printf("g * f = %i\n", g_args.result * f_args.result);
+    printf("g = %c\n", g_args.result);
+    printf("f = %c\n", f_args.result);
+    printf("g * f = %c\n", dot(g_args.result, f_args.result));
     return 0;
 }
