@@ -16,8 +16,8 @@
 #define EXECUTING 'E'
 #define G_STATUS_ADDRESS 0
 #define F_STATUS_ADDRESS 1
-#define CONTINUE_PROMPT_TIMEOUT_LENGTH 13
-#define CONTINUE_PROMPT_TIMEOUT_LENGTH 21
+#define CONTINUE_PROMPT_TIMEOUT_LENGTH1 10
+#define CONTINUE_PROMPT_TIMEOUT_LENGTH2 10
 #define CHECK_STATUSES_TIMEOUT_LENGTH 2
 #define RESULT_NOT_SET -1
 
@@ -39,6 +39,7 @@ typedef struct {
     int result;
 } g_args;
 
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 char* getSharedMemory(){
     char* shared_memory;
@@ -59,6 +60,7 @@ char* getSharedMemory(){
         perror("mmap");
         exit(EXIT_FAILURE);
     }
+    close(fd);
     return shared_memory;
 }
 
@@ -67,10 +69,12 @@ char isResultDetermined(){
     char *shared_memory = getSharedMemory();
     char f_res = shared_memory[F_STATUS_ADDRESS];
     char g_res = shared_memory[G_STATUS_ADDRESS];
+    char res = EXECUTING;
+
     printf("checking out f: %c\n", f_res);
     switch (f_res){
         case FALSE:
-            return FALSE;
+            res = FALSE;
             break;
         default:
             break;
@@ -78,12 +82,14 @@ char isResultDetermined(){
     printf("checking out g: %c\n", g_res);
     switch (g_res){
         case FALSE:
-            return FALSE;
+            res = FALSE;
             break;
         default:
             break;
     }
-    return EXECUTING;
+
+    munmap((void*)shared_memory, SHARED_MEMORY_SIZE);
+    return res;
 }
 
 void *f(void *arg){
@@ -91,19 +97,14 @@ void *f(void *arg){
     int x = targ->x;
     int y = targ->y;
 
-    char *shared_memory = getSharedMemory();
-    shared_memory[F_STATUS_ADDRESS] = EXECUTING;
-
     while (1){
         sleep(SLEEP_INTERVAL);
         x -= y;
         if (x == 0){
-            shared_memory[F_STATUS_ADDRESS] = TRUE;
             targ->result = TRUE;
             break;
         }
         if (x < 0){
-            shared_memory[F_STATUS_ADDRESS] = FALSE;
             targ->result = FALSE;
             break;
         }
@@ -115,10 +116,6 @@ void *g(void *arg){
     g_args *targ = (g_args*)arg;
     double t = targ->t;
     printf("%f\n", t);
-
-    char *shared_memory = getSharedMemory();
-    shared_memory[G_STATUS_ADDRESS] = EXECUTING;
-
 
     double result;
 
@@ -138,7 +135,6 @@ void *g(void *arg){
 
     if (t <= 0) {
         printf("Error: t can`t be negative or zero.\n");
-        shared_memory[G_STATUS_ADDRESS] = FALSE;
         targ->result = FALSE;
         pthread_exit(NULL);
     }
@@ -148,7 +144,6 @@ void *g(void *arg){
     printf("t^3 + t^2 + 10t - log_t(5) = %.2f\n", result);
     sleep(SLEEP_INTERVAL);
 
-    shared_memory[G_STATUS_ADDRESS] = TRUE;
     targ->result = TRUE;
     pthread_exit(NULL);
 }
@@ -158,24 +153,35 @@ void *executeG(void *arg) {
     pthread_t function_thread;
     pthread_create(&function_thread, NULL, g, (void*)targ);
     int time_executing = 0;
+
+    char *shared_memory = getSharedMemory();
+    shared_memory[F_STATUS_ADDRESS] = EXECUTING;
+
     while(1){
        if (targ->result != RESULT_NOT_SET){
+            shared_memory[G_STATUS_ADDRESS] = targ->result;
             printf("g result set = %c\n", targ->result);
             break;
         }
         sleep(CHECK_STATUSES_TIMEOUT_LENGTH);
         char res = isResultDetermined();
+        printf("determined result g: %c\n", res);
         if (res != EXECUTING){
             pthread_cancel(function_thread);
             targ->result = res;
+            break;
         }
 
         time_executing += CHECK_STATUSES_TIMEOUT_LENGTH;
-        if (time_executing >= CONTINUE_PROMPT_TIMEOUT_LENGTH){
+        if (time_executing >= CONTINUE_PROMPT_TIMEOUT_LENGTH1){
             time_executing = 0;
+            
+            pthread_mutex_lock(&mutex);
             printf("Execution of function g is taking long. Do you want to continue? (y/n): ");
             char choice;
             scanf(" %c", &choice);
+            pthread_mutex_unlock(&mutex);
+
             if (choice != 'y' && choice != 'Y') {
                 char *shared_memory = getSharedMemory();
                 shared_memory[G_STATUS_ADDRESS] = UNDEFINED;
@@ -192,25 +198,36 @@ void *executeF(void *arg) {
     pthread_t function_thread;
     pthread_create(&function_thread, NULL, f, (void*)targ);
     int time_executing = 0;
+
+    char *shared_memory = getSharedMemory();
+    shared_memory[F_STATUS_ADDRESS] = EXECUTING;
+
     while(1){
         if (targ->result != RESULT_NOT_SET){
+            shared_memory[F_STATUS_ADDRESS] = targ->result;
             printf("f result set = %i\n", targ->result);
             break;
         }
+        
         sleep(CHECK_STATUSES_TIMEOUT_LENGTH);
         char res = isResultDetermined();
+            printf("determined result f: %c\n", res);
         if (res != EXECUTING){
             pthread_cancel(function_thread);
-            targ->result = UNDEFINED;
+            targ->result = res;
             break;
         }
 
         time_executing += CHECK_STATUSES_TIMEOUT_LENGTH;
-        if (time_executing >= CONTINUE_PROMPT_TIMEOUT_LENGTH){
+        if (time_executing >= CONTINUE_PROMPT_TIMEOUT_LENGTH2){
             time_executing = 0;
+
+            pthread_mutex_lock(&mutex);
             printf("Execution of function f is taking long. Do you want to continue? (y/n): ");
             char choice;
             scanf(" %c", &choice);
+            pthread_mutex_unlock(&mutex);
+
             if (choice != 'y' && choice != 'Y') {
                 char *shared_memory = getSharedMemory();
                 shared_memory[F_STATUS_ADDRESS] = UNDEFINED;
